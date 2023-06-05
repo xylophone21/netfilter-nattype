@@ -65,6 +65,7 @@ struct nat_mapping_original_tuple {
 
 struct nat_mapping {
   uint16_t port;     /* external UDP port */
+  __be32 addr;       /* external addr */
   int ifindex;       /* external interface index*/
 
   __be32 int_addr;   /* internal source ip address */
@@ -479,15 +480,15 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
   struct nf_nat_range newrange;
 #endif
 
-  __be32 new_ip, ip;
-  __be32 other_ip = 0;
-  uint16_t port, original_port, want_port;
-  uint16_t other_port = 0;
+  __be32 new_ip = 0;
+  __be32 src_ip = 0;
+  __be32 dst_ip = 0;
+  uint16_t want_port = 0;
+  uint16_t src_port = 0;
+  uint16_t dst_port = 0;
   uint8_t protonum;
   int ifindex;
 
-  ip = 0;
-  original_port = 0;
   src_mapping = NULL;
 
   mr = par->targinfo;
@@ -518,17 +519,17 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
       return ret;
     }
     // 目标ep,即nat的公网ip:port
-    ip = (ct_tuple_origin->dst).u3.ip;
-    port = be16_to_cpu((ct_tuple_origin->dst).u.udp.port);
+    dst_ip = (ct_tuple_origin->dst).u3.ip;
+    dst_port = be16_to_cpu((ct_tuple_origin->dst).u.udp.port);
 
     // 源ep,即公网Client 的ip:port
-    other_ip = (ct_tuple_origin->src).u3.ip;
-    other_port = be16_to_cpu((ct_tuple_origin->src).u.udp.port);
-    pr_debug("xt_FULLCONENAT: PRE_ROUTING ip:port = %pI4:%d ==> %pI4:%d\n",&other_ip,other_port, &ip, port);
+    src_ip = (ct_tuple_origin->src).u3.ip;
+    src_port = be16_to_cpu((ct_tuple_origin->src).u.udp.port);
+    pr_debug("xt_FULLCONENAT: PRE_ROUTING ip:port = %pI4:%d ==> %pI4:%d\n",&src_ip,src_port, &dst_ip, dst_port);
 
     /* get the corresponding ifindex by the dst_ip (aka. external ip of this host),
      * in case the packet needs to be forwarded from another inbound interface. */
-    net_dev = ip_dev_find(net, ip);
+    net_dev = ip_dev_find(net, dst_ip);
     if (net_dev != NULL) {
       ifindex = net_dev->ifindex;
       dev_put(net_dev);
@@ -537,7 +538,7 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
     spin_lock_bh(&fullconenat_lock);
 
     /* find an active mapping based on the inbound port */
-    mapping = get_mapping_by_ext_port(port, ifindex);
+    mapping = get_mapping_by_ext_port(dst_port, ifindex);
     if (mapping == NULL) {
       spin_unlock_bh(&fullconenat_lock);
       return ret;
@@ -573,15 +574,15 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
 
     if (protonum == IPPROTO_UDP) {
       // 内网Clientep发往公网Client流程,首次发包会到这里
-      ip = (ct_tuple_origin->src).u3.ip;
-      original_port = be16_to_cpu((ct_tuple_origin->src).u.udp.port);
+      src_ip = (ct_tuple_origin->src).u3.ip;
+      src_port = be16_to_cpu((ct_tuple_origin->src).u.udp.port);
 
       // 目标公网EP
-      other_ip = (ct_tuple_origin->dst).u3.ip;
-      other_port = be16_to_cpu((ct_tuple_origin->dst).u.udp.port);
-      pr_debug("xt_FULLCONENAT: POST_ROUTING ip:port = %pI4:%d ==> %pI4:%d\n", &ip, original_port, &other_ip,other_port);
+      dst_ip = (ct_tuple_origin->dst).u3.ip;
+      dst_port = be16_to_cpu((ct_tuple_origin->dst).u.udp.port);
+      pr_debug("xt_FULLCONENAT: POST_ROUTING ip:port = %pI4:%d ==> %pI4:%d\n", &src_ip, src_port, &dst_ip, dst_port);
 
-      src_mapping = get_mapping_by_int_src(ip, original_port);
+      src_mapping = get_mapping_by_int_src(src_ip, src_port);
       if (src_mapping != NULL && check_mapping(src_mapping, net, zone)) {
         // 测试:正常代码应该不会来这里,第二次直接走了已有的规则(?),过期后这里也已经被删除了
 
@@ -601,7 +602,7 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
 
         /* if not, we find a new external port to map to.
          * the SNAT may fail so we should re-check the mapped port later. */
-        want_port = find_appropriate_port(net, zone, original_port, ifindex, range);
+        want_port = find_appropriate_port(net, zone, src_port, ifindex, range);
 
         newrange.flags = NF_NAT_RANGE_MAP_IPS | NF_NAT_RANGE_PROTO_SPECIFIED;
         newrange.min_proto.udp.port = cpu_to_be16(want_port);
@@ -635,15 +636,15 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
     /* the reply tuple contains the mapped port. */
     ct_tuple = &(ct->tuplehash[IP_CT_DIR_REPLY].tuple);
     /* this is the resulted mapped port. */
-    port = be16_to_cpu((ct_tuple->dst).u.udp.port);
-    other_ip = (ct_tuple->dst).u3.ip;
+    want_port = be16_to_cpu((ct_tuple->dst).u.udp.port);
+    new_ip = (ct_tuple->dst).u3.ip;
 
-    pr_debug("xt_FULLCONENAT: <OUTBOUND SNAT> %s ==> %pI4:%d\n", nf_ct_stringify_tuple(ct_tuple_origin), &other_ip, port);
+    pr_debug("xt_FULLCONENAT: <OUTBOUND SNAT> %s ==> %pI4:%d\n", nf_ct_stringify_tuple(ct_tuple_origin), &new_ip, want_port);
 
     /* save the mapping information into our mapping table */
     mapping = src_mapping;
     if (mapping == NULL || !check_mapping(mapping, net, zone)) {
-      mapping = allocate_mapping(ip, original_port, port, ifindex);
+      mapping = allocate_mapping(src_ip, src_port, want_port, ifindex);
     }
     if (mapping != NULL) {
       add_original_tuple_to_mapping(mapping, ct_tuple_origin);
