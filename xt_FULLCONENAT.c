@@ -5,6 +5,7 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
+#define DEBUG // 将日志打印到dmesg,可以用dmesg -c清理之前的日志
 
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -479,7 +480,9 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
 #endif
 
   __be32 new_ip, ip;
+  __be32 other_ip = 0;
   uint16_t port, original_port, want_port;
+  uint16_t other_port = 0;
   uint8_t protonum;
   int ifindex;
 
@@ -504,6 +507,7 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
   newrange.max_proto   = mr->range[0].max;
 
   if (xt_hooknum(par) == NF_INET_PRE_ROUTING) {
+    // pre routing,即公网Client网NAT 公网IP发包的处理流程
     /* inbound packets */
     ifindex = xt_in(par)->ifindex;
 
@@ -513,8 +517,14 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
     if (protonum != IPPROTO_UDP) {
       return ret;
     }
+    // 目标ep,即nat的公网ip:port
     ip = (ct_tuple_origin->dst).u3.ip;
     port = be16_to_cpu((ct_tuple_origin->dst).u.udp.port);
+
+    // 源ep,即公网Client 的ip:port
+    other_ip = (ct_tuple_origin->src).u3.ip;
+    other_port = be16_to_cpu((ct_tuple_origin->src).u.udp.port);
+    pr_debug("xt_FULLCONENAT: PRE_ROUTING ip:port = %pI4:%d ==> %pI4:%d\n",&other_ip,other_port, &ip, port);
 
     /* get the corresponding ifindex by the dst_ip (aka. external ip of this host),
      * in case the packet needs to be forwarded from another inbound interface. */
@@ -562,11 +572,18 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
     spin_lock_bh(&fullconenat_lock);
 
     if (protonum == IPPROTO_UDP) {
+      // 内网Clientep发往公网Client流程,首次发包会到这里
       ip = (ct_tuple_origin->src).u3.ip;
       original_port = be16_to_cpu((ct_tuple_origin->src).u.udp.port);
 
+      // 目标公网EP
+      other_ip = (ct_tuple_origin->dst).u3.ip;
+      other_port = be16_to_cpu((ct_tuple_origin->dst).u.udp.port);
+      pr_debug("xt_FULLCONENAT: POST_ROUTING ip:port = %pI4:%d ==> %pI4:%d\n", &ip, original_port, &other_ip,other_port);
+
       src_mapping = get_mapping_by_int_src(ip, original_port);
       if (src_mapping != NULL && check_mapping(src_mapping, net, zone)) {
+        // 测试:正常代码应该不会来这里,第二次直接走了已有的规则(?),过期后这里也已经被删除了
 
         /* outbound nat: if a previously established mapping is active,
          * we will reuse that mapping. */
@@ -574,6 +591,11 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
         newrange.flags = NF_NAT_RANGE_MAP_IPS | NF_NAT_RANGE_PROTO_SPECIFIED;
         newrange.min_proto.udp.port = cpu_to_be16(src_mapping->port);
         newrange.max_proto = newrange.min_proto;
+
+        pr_debug(
+            "xt_FULLCONENAT: POST_ROUTING found src_mapping port = %d,int ip:port = "
+            "%pI4:%d \n",
+            src_mapping->port, &src_mapping->int_addr, src_mapping->int_port);
 
       } else {
 
@@ -587,6 +609,8 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
 
         src_mapping = NULL;
 
+        // 没找到nat端口,首次发包到这里
+        pr_debug("xt_FULLCONENAT: POST_ROUTING not found,using new want_port port = %d\n",want_port);
       }
     }
 
@@ -612,8 +636,9 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
     ct_tuple = &(ct->tuplehash[IP_CT_DIR_REPLY].tuple);
     /* this is the resulted mapped port. */
     port = be16_to_cpu((ct_tuple->dst).u.udp.port);
+    other_ip = (ct_tuple->dst).u3.ip;
 
-    pr_debug("xt_FULLCONENAT: <OUTBOUND SNAT> %s ==> %d\n", nf_ct_stringify_tuple(ct_tuple_origin), port);
+    pr_debug("xt_FULLCONENAT: <OUTBOUND SNAT> %s ==> %pI4:%d\n", nf_ct_stringify_tuple(ct_tuple_origin), &other_ip, port);
 
     /* save the mapping information into our mapping table */
     mapping = src_mapping;
