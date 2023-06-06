@@ -1,4 +1,36 @@
+# netfilter-nattype
+基于Linux Nat的RFC3489 Nat类型实现,包括:
+- Full Cone
+  - 类似下面的指令实现的实际上是dmz主机,详见https://blog.chionlab.moe/2018/02/09/full-cone-nat-with-linux/
+  - sudo iptables -t nat -A PREROUTING -i ens33 -j DNAT --to-destination 192.168.99.101
+- Address-Restricted Cone
+  - 类似下面的命令实际无法实现
+  - sudo iptables -A INPUT -i ens33 -p udp -m state --state ESTABLISHED,RELATED -j ACCEPT
+  - sudo iptables -A INPUT -i ens33 -p udp -m state --state NEW -j DROP
+- Port-Restricted Cone NAT
+  - 其实也可以用下面的指令实现,但下挂多个NAT时不可靠,详见https://blog.csdn.net/u011245325/article/details/9294229
+  - sudo iptables -t nat -A POSTROUTING -s 192.168.99.0/24 -o ens33 -j MASQUERADE
 
+不包括:
+- Symmetric NAT
+  - 可以用下面的指令直接实现.
+  - sudo iptables -t nat -A POSTROUTING -s 192.168.99.0/24 -o ens33 -j MASQUERADE --random
+
+# How to use
+````shell
+sudo ./iptables -t nat -A POSTROUTING -o ens33 -j FULLCONENAT
+sudo ./iptables -t nat -A PREROUTING -i ens33 -j FULLCONENAT --nat-type fc|ar|pr
+````
+
+# 注意
+代码未经过严格测试,且存在部分work-around处理,请谨慎使用.
+
+# 上游代码
+https://github.com/Chion82/netfilter-full-cone-nat
+
+
+Original Readme
+======
 Implementation of RFC3489-compatible full cone SNAT.
 
 Assuming eth0 is external interface:
