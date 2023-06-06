@@ -57,6 +57,18 @@ static inline unsigned int xt_hooknum(const struct xt_action_param *par) {
 
 #endif
 
+enum {
+	NAT_TYPE_FULL_CONE,
+	NAT_TYPE_Address_Restricted,
+	NAT_TYPE_Port_Restricted,
+};
+
+struct nf_nat_ipv4_multi_range_compat_withtype {
+	unsigned int			rangesize;
+	struct nf_nat_ipv4_range	range[1];
+	int nattype;
+};
+
 struct nat_mapping_original_tuple {
   struct nf_conntrack_tuple tuple;
 
@@ -460,7 +472,7 @@ static uint16_t find_appropriate_port(struct net *net, const struct nf_conntrack
 
 static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_param *par)
 {
-  const struct nf_nat_ipv4_multi_range_compat *mr;
+  const struct nf_nat_ipv4_multi_range_compat_withtype *mr;
   const struct nf_nat_ipv4_range *range;
 
   const struct nf_conntrack_zone *zone;
@@ -556,20 +568,30 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
       return ret;
     }
 
-    list_for_each_safe(iter, tmp, &mapping->original_tuple_list) {
-      original_tuple_item = list_entry(iter, struct nat_mapping_original_tuple, node);
-      origin_tuple = &(original_tuple_item->tuple);
+    if(mr->nattype == NAT_TYPE_FULL_CONE) {
+      // FULL_CONE, not check original ep and src ep
+      pr_debug("xt_FULLCONENAT: PRE_ROUTING FULL_CONE");
+      match = 1;
+    } else if (mr->nattype == NAT_TYPE_Address_Restricted || mr->nattype == NAT_TYPE_Port_Restricted) {
+      list_for_each_safe(iter, tmp, &mapping->original_tuple_list) {
+        original_tuple_item = list_entry(iter, struct nat_mapping_original_tuple, node);
+        origin_tuple = &(original_tuple_item->tuple);
 
-      if (origin_tuple != NULL) {
-        original_dst_ip = (origin_tuple->dst).u3.ip;
-        original_dst_port = be16_to_cpu((origin_tuple->dst).u.udp.port);
+        if (origin_tuple != NULL) {
+          original_dst_ip = (origin_tuple->dst).u3.ip;
+          original_dst_port = be16_to_cpu((origin_tuple->dst).u.udp.port);
 
-        pr_debug("xt_FULLCONENAT: PRE_ROUTING original_tuple_list ip:port = %pI4:%d\n",&original_dst_ip,original_dst_port);
+          pr_debug("xt_FULLCONENAT: PRE_ROUTING original_tuple_list %d ip:port = %pI4:%d\n",mr->nattype, &original_dst_ip,original_dst_port);
 
-        // Restricted Cone Nat
-        if (original_dst_ip == src_ip) {
-          match = 1;
-          break;
+          if (mr->nattype == NAT_TYPE_Address_Restricted && original_dst_ip == src_ip) {
+            // Restricted Cone Nat
+            match = 1;
+            break;
+          } else if (mr->nattype == NAT_TYPE_Port_Restricted && original_dst_ip == src_ip && original_dst_port == src_port) {
+            // Port Restricted Cone Nat
+            match = 1;
+            break;
+          }
         }
       }
     }
@@ -751,7 +773,7 @@ static struct xt_target tg_reg[] __read_mostly = {
   .family     = NFPROTO_IPV4,
   .revision   = 0,
   .target     = fullconenat_tg,
-  .targetsize = sizeof(struct nf_nat_ipv4_multi_range_compat),
+  .targetsize = sizeof(struct nf_nat_ipv4_multi_range_compat_withtype),
   .table      = "nat",
   .hooks      = (1 << NF_INET_PRE_ROUTING) |
                 (1 << NF_INET_POST_ROUTING),

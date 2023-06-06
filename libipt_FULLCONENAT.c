@@ -17,8 +17,22 @@ enum {
 	O_RANDOM,
 	O_RANDOM_FULLY,
 	O_TO_SRC,
+	O_NAT_TYPE,
 };
 
+enum {
+	NAT_TYPE_FULL_CONE,
+	NAT_TYPE_Address_Restricted,
+	NAT_TYPE_Port_Restricted,
+};
+
+struct nf_nat_ipv4_multi_range_compat_withtype {
+	unsigned int			rangesize;
+	struct nf_nat_ipv4_range	range[1];
+	int nattype;
+};
+
+// type ./iptables -t nat -j FULLCONENAT -h to see this help
 static void FULLCONENAT_help(void)
 {
 	printf(
@@ -27,6 +41,8 @@ static void FULLCONENAT_help(void)
 "				Address to map source to.\n"
 " --to-ports <port>[-<port>]\n"
 "				Port (range) to map to.\n"
+" --nat-type <type>\n"
+"				Set nat type, fc:Full Cone, ar:Address-Restricted Cone, pr:Port-Restricted Cone NAT;\n"
 " --random\n"
 "				Randomize source port.\n"
 " --random-fully\n"
@@ -38,12 +54,27 @@ static const struct xt_option_entry FULLCONENAT_opts[] = {
 	{.name = "random", .id = O_RANDOM, .type = XTTYPE_NONE},
 	{.name = "random-fully", .id = O_RANDOM_FULLY, .type = XTTYPE_NONE},
 	{.name = "to-source", .id = O_TO_SRC, .type = XTTYPE_STRING},
+	{.name = "nat-type", .id = O_NAT_TYPE, .type = XTTYPE_STRING},
 	XTOPT_TABLEEND,
 };
 
-static void parse_to(const char *orig_arg, struct nf_nat_ipv4_multi_range_compat *mr)
+static void parse_nat_type(const char *orig_arg, struct nf_nat_ipv4_multi_range_compat_withtype *mr)
 {
-	char *arg, *dash, *error;
+	if (strcmp(orig_arg,"fc") == 0) {
+		mr->nattype = NAT_TYPE_FULL_CONE;
+	} else if(strcmp(orig_arg,"ar") == 0) {
+		mr->nattype = NAT_TYPE_Address_Restricted;
+	} else if(strcmp(orig_arg,"pr") == 0) {
+		mr->nattype = NAT_TYPE_Port_Restricted;
+	} else {
+		xtables_error(PARAMETER_PROBLEM, "Bad nat-type \"%s\"\n",
+			   orig_arg);
+	}
+}
+
+static void parse_to(const char *orig_arg, struct nf_nat_ipv4_multi_range_compat_withtype *mr)
+{
+	char *arg, *dash;
 	const struct in_addr *ip;
 
 	arg = strdup(orig_arg);
@@ -75,7 +106,7 @@ static void parse_to(const char *orig_arg, struct nf_nat_ipv4_multi_range_compat
 
 static void FULLCONENAT_init(struct xt_entry_target *t)
 {
-	struct nf_nat_ipv4_multi_range_compat *mr = (struct nf_nat_ipv4_multi_range_compat *)t->data;
+	struct nf_nat_ipv4_multi_range_compat_withtype *mr = (struct nf_nat_ipv4_multi_range_compat_withtype *)t->data;
 
 	/* Actually, it's 0, but it's ignored at the moment. */
 	mr->rangesize = 1;
@@ -83,7 +114,7 @@ static void FULLCONENAT_init(struct xt_entry_target *t)
 
 /* Parses ports */
 static void
-parse_ports(const char *arg, struct nf_nat_ipv4_multi_range_compat *mr)
+parse_ports(const char *arg, struct nf_nat_ipv4_multi_range_compat_withtype *mr)
 {
 	char *end;
 	unsigned int port, maxport;
@@ -119,7 +150,7 @@ static void FULLCONENAT_parse(struct xt_option_call *cb)
 {
 	const struct ipt_entry *entry = cb->xt_entry;
 	int portok;
-	struct nf_nat_ipv4_multi_range_compat *mr = cb->data;
+	struct nf_nat_ipv4_multi_range_compat_withtype *mr = cb->data;
 
 	if (entry->ip.proto == IPPROTO_TCP
 	    || entry->ip.proto == IPPROTO_UDP
@@ -141,6 +172,9 @@ static void FULLCONENAT_parse(struct xt_option_call *cb)
 	case O_TO_SRC:
 		parse_to(cb->arg, mr);
 		break;
+	case O_NAT_TYPE:
+		parse_nat_type(cb->arg, mr);
+		break;
 	case O_RANDOM:
 		mr->range[0].flags |=  NF_NAT_RANGE_PROTO_RANDOM;
 		break;
@@ -154,7 +188,7 @@ static void
 FULLCONENAT_print(const void *ip, const struct xt_entry_target *target,
                  int numeric)
 {
-	const struct nf_nat_ipv4_multi_range_compat *mr = (const void *)target->data;
+	const struct nf_nat_ipv4_multi_range_compat_withtype *mr = (const void *)target->data;
 	const struct nf_nat_ipv4_range *r = &mr->range[0];
 
 	if (r->flags & NF_NAT_RANGE_MAP_IPS) {
@@ -185,7 +219,7 @@ FULLCONENAT_print(const void *ip, const struct xt_entry_target *target,
 static void
 FULLCONENAT_save(const void *ip, const struct xt_entry_target *target)
 {
-	const struct nf_nat_ipv4_multi_range_compat *mr = (const void *)target->data;
+	const struct nf_nat_ipv4_multi_range_compat_withtype *mr = (const void *)target->data;
 	const struct nf_nat_ipv4_range *r = &mr->range[0];
 
 	if (r->flags & NF_NAT_RANGE_MAP_IPS) {
@@ -216,8 +250,8 @@ static struct xtables_target fullconenat_tg_reg = {
 	.name		= "FULLCONENAT",
 	.version	= XTABLES_VERSION,
 	.family		= NFPROTO_IPV4,
-	.size		= XT_ALIGN(sizeof(struct nf_nat_ipv4_multi_range_compat)),
-	.userspacesize	= XT_ALIGN(sizeof(struct nf_nat_ipv4_multi_range_compat)),
+	.size		= XT_ALIGN(sizeof(struct nf_nat_ipv4_multi_range_compat_withtype)),
+	.userspacesize	= XT_ALIGN(sizeof(struct nf_nat_ipv4_multi_range_compat_withtype)),
 	.help		= FULLCONENAT_help,
 	.init		= FULLCONENAT_init,
 	.x6_parse	= FULLCONENAT_parse,

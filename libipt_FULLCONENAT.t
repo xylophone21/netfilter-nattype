@@ -7,3 +7,4 @@
 -p udp -j FULLCONENAT --to-ports 1024-65535;=;OK
 -p udp -j FULLCONENAT --to-ports 1024-65536;;FAIL
 -p udp -j FULLCONENAT --to-ports -1;;FAIL
+-j FULLCONENAT --nat-type ar;=;OK
