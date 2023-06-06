@@ -65,7 +65,6 @@ struct nat_mapping_original_tuple {
 
 struct nat_mapping {
   uint16_t port;     /* external UDP port */
-  __be32 addr;       /* external addr */
   int ifindex;       /* external interface index*/
 
   __be32 int_addr;   /* internal source ip address */
@@ -489,6 +488,14 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
   uint8_t protonum;
   int ifindex;
 
+  // lihui: for Nat Filtering check
+  int match = 0;
+  struct list_head *iter, *tmp;
+  struct nat_mapping_original_tuple *original_tuple_item;
+  struct nf_conntrack_tuple *origin_tuple;
+  __be32 original_dst_ip = 0;
+  uint16_t original_dst_port = 0;
+
   src_mapping = NULL;
 
   mr = par->targinfo;
@@ -537,27 +544,54 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
 
     spin_lock_bh(&fullconenat_lock);
 
+    // ubuntu 20.04上有个bug, 在mapping==NULL返回XT_CONTINUE,则第二次发送相同的包就不会再来这里,似乎是cache住了,但查看源码似乎没有对应的cache,暂时drop掉
+    // 这里返回DROP可能会导致注册多个-j时出现冲突,暂时忽略
+    // https://github.com/Chion82/netfilter-full-cone-nat/issues/44
+    ret = NF_DROP;
+
     /* find an active mapping based on the inbound port */
     mapping = get_mapping_by_ext_port(dst_port, ifindex);
-    if (mapping == NULL) {
+    if (mapping == NULL || check_mapping(mapping, net, zone) == 0) {
       spin_unlock_bh(&fullconenat_lock);
       return ret;
     }
-    if (check_mapping(mapping, net, zone)) {
-      newrange.flags = NF_NAT_RANGE_MAP_IPS | NF_NAT_RANGE_PROTO_SPECIFIED;
-      newrange.min_addr.ip = mapping->int_addr;
-      newrange.max_addr.ip = mapping->int_addr;
-      newrange.min_proto.udp.port = cpu_to_be16(mapping->int_port);
-      newrange.max_proto = newrange.min_proto;
 
-      pr_debug("xt_FULLCONENAT: <INBOUND DNAT> %s ==> %pI4:%d\n", nf_ct_stringify_tuple(ct_tuple_origin), &mapping->int_addr, mapping->int_port);
+    list_for_each_safe(iter, tmp, &mapping->original_tuple_list) {
+      original_tuple_item = list_entry(iter, struct nat_mapping_original_tuple, node);
+      origin_tuple = &(original_tuple_item->tuple);
 
-      ret = nf_nat_setup_info(ct, &newrange, HOOK2MANIP(xt_hooknum(par)));
+      if (origin_tuple != NULL) {
+        original_dst_ip = (origin_tuple->dst).u3.ip;
+        original_dst_port = be16_to_cpu((origin_tuple->dst).u.udp.port);
 
-      if (ret == NF_ACCEPT) {
-        add_original_tuple_to_mapping(mapping, ct_tuple_origin);
-        pr_debug("xt_FULLCONENAT: fullconenat_tg(): INBOUND: refer_count for mapping at ext_port %d is now %d\n", mapping->port, mapping->refer_count);
+        pr_debug("xt_FULLCONENAT: PRE_ROUTING original_tuple_list ip:port = %pI4:%d\n",&original_dst_ip,original_dst_port);
+
+        // Restricted Cone Nat
+        if (original_dst_ip == src_ip) {
+          match = 1;
+          break;
+        }
       }
+    }
+    if (match == 0) {
+      pr_debug("xt_FULLCONENAT: Nat Filtering not allowed\n");
+      spin_unlock_bh(&fullconenat_lock);
+      return ret;
+    }
+
+    newrange.flags = NF_NAT_RANGE_MAP_IPS | NF_NAT_RANGE_PROTO_SPECIFIED;
+    newrange.min_addr.ip = mapping->int_addr;
+    newrange.max_addr.ip = mapping->int_addr;
+    newrange.min_proto.udp.port = cpu_to_be16(mapping->int_port);
+    newrange.max_proto = newrange.min_proto;
+
+    pr_debug("xt_FULLCONENAT: <INBOUND DNAT> %s ==> %pI4:%d\n", nf_ct_stringify_tuple(ct_tuple_origin), &mapping->int_addr, mapping->int_port);
+
+    ret = nf_nat_setup_info(ct, &newrange, HOOK2MANIP(xt_hooknum(par)));
+
+    if (ret == NF_ACCEPT) {
+      add_original_tuple_to_mapping(mapping, ct_tuple_origin);
+      pr_debug("xt_FULLCONENAT: fullconenat_tg(): INBOUND: refer_count for mapping at ext_port %d is now %d\n", mapping->port, mapping->refer_count);
     }
     spin_unlock_bh(&fullconenat_lock);
     return ret;
@@ -584,7 +618,8 @@ static unsigned int fullconenat_tg(struct sk_buff *skb, const struct xt_action_p
 
       src_mapping = get_mapping_by_int_src(src_ip, src_port);
       if (src_mapping != NULL && check_mapping(src_mapping, net, zone)) {
-        // 测试:正常代码应该不会来这里,第二次直接走了已有的规则(?),过期后这里也已经被删除了
+        // 测试一个内网ep发往一个公网ep不会走到这里来,应该是已经有规则了走了cache
+        // 但是一个内网ep发往第二个公网ep时会走到这里来
 
         /* outbound nat: if a previously established mapping is active,
          * we will reuse that mapping. */
