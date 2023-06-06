@@ -184,6 +184,7 @@ static void FULLCONENAT_parse(struct xt_option_call *cb)
 	}
 }
 
+// sudo ./iptables -t nat -L -n -v查看
 static void
 FULLCONENAT_print(const void *ip, const struct xt_entry_target *target,
                  int numeric)
@@ -214,8 +215,21 @@ FULLCONENAT_print(const void *ip, const struct xt_entry_target *target,
 
 	if (r->flags & NF_NAT_RANGE_PROTO_RANDOM_FULLY)
 		printf(" random-fully");
+
+	switch(mr->nattype) {
+		case NAT_TYPE_FULL_CONE:
+			printf(" full-cone");
+			break;
+		case NAT_TYPE_Address_Restricted:
+			printf(" address-restricted");
+			break;
+		case NAT_TYPE_Port_Restricted:
+			printf(" port-restricted");
+			break;
+	}
 }
 
+// sudo ./iptables-save显示
 static void
 FULLCONENAT_save(const void *ip, const struct xt_entry_target *target)
 {
@@ -244,6 +258,18 @@ FULLCONENAT_save(const void *ip, const struct xt_entry_target *target)
 
 	if (r->flags & NF_NAT_RANGE_PROTO_RANDOM_FULLY)
 		printf(" --random-fully");
+
+	switch(mr->nattype) {
+		case NAT_TYPE_FULL_CONE:
+			printf(" full-cone");
+			break;
+		case NAT_TYPE_Address_Restricted:
+			printf(" address-restricted");
+			break;
+		case NAT_TYPE_Port_Restricted:
+			printf(" port-restricted");
+			break;
+	}
 }
 
 static struct xtables_target fullconenat_tg_reg = {
